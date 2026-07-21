@@ -7,6 +7,7 @@ image or text quality, so output is visually/textually identical to
 the input.
 
 Usage:
+    python compress_pdf.py                              # no args: compress every *.pdf sitting next to this script
     python compress_pdf.py input.pdf
     python compress_pdf.py input.pdf output.pdf
     python compress_pdf.py some_folder/                # batch, writes *_compressed.pdf next to each source
@@ -41,27 +42,35 @@ def compress_pdf(input_path: Path, output_path: Path, level: int = 9) -> tuple[i
     return input_path.stat().st_size, output_path.stat().st_size
 
 
-def iter_pdfs(path: Path):
+def iter_pdfs(path: Path, recursive: bool = True):
     if path.is_file():
         yield path
-    else:
-        yield from sorted(path.rglob("*.pdf"))
+        return
+    pdfs = path.rglob("*.pdf") if recursive else path.glob("*.pdf")
+    for p in sorted(pdfs):
+        if p.stem.endswith("_compressed"):
+            continue
+        yield p
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("input", type=Path, help="PDF file or folder")
+    parser.add_argument("input", type=Path, nargs="?", help="PDF file or folder (default: the folder this script is in)")
     parser.add_argument("output", type=Path, nargs="?", help="Output file or folder (default: *_compressed.pdf next to input)")
     parser.add_argument("--level", type=int, default=9, choices=range(0, 10), help="Deflate compression level 0-9 (default 9)")
     parser.add_argument("--in-place", action="store_true", help="Overwrite the input file(s) instead of writing a new one")
     args = parser.parse_args()
+
+    recursive = args.input is not None
+    if args.input is None:
+        args.input = Path(__file__).resolve().parent
 
     if not args.input.exists():
         sys.exit(f"Not found: {args.input}")
     if args.in_place and args.output:
         sys.exit("--in-place cannot be combined with an output path")
 
-    targets = list(iter_pdfs(args.input))
+    targets = list(iter_pdfs(args.input, recursive=recursive))
     if not targets:
         sys.exit("No PDF files found.")
 

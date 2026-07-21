@@ -11,6 +11,10 @@ pip install -r requirements.txt
 ## 用法
 
 ```bash
+# 不加任何參數:把 PDF 直接丟進這個資料夾,執行後會自動抓資料夾裡的所有 *.pdf 逐一壓縮
+# (已經是 *_compressed.pdf 的檔案會自動跳過,不會重複壓縮)
+python compress_pdf.py
+
 # 單一檔案,預設輸出 input_compressed.pdf
 python compress_pdf.py input.pdf
 
