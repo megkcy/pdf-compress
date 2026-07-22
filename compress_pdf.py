@@ -1,33 +1,37 @@
 #!/usr/bin/env python3
-"""Compress PDF files.
+"""Losslessly compress PDF files.
 
 By default, only re-encodes content streams with maximum deflate
 compression. Does not touch image or text quality, so output is
 visually/textually identical to the input (truly lossless).
 
-Pass --lossy to also recompress embedded raster images as JPEG at a
-given quality. This DOES reduce image quality, but shrinks image-heavy
-PDFs much more than the lossless mode can.
-
 Pass --dedup to additionally merge duplicate objects (repeated fonts,
 repeated images, orphaned objects) via pypdf's compress_identical_objects.
-This can save a lot more space, but that pypdf feature has a history of
-hash-collision bugs that can wrongly merge two DIFFERENT images and
-corrupt the output. To guard against that, every image is fingerprinted
-before and after dedup; if anything doesn't match up, this tool discards
-the dedup result and silently falls back to the safe (non-dedup) output
-for that file, and prints a warning.
+This can save a lot more space (10-20% on image-heavy PDFs that reuse
+artwork), but that pypdf feature has a history of hash-collision bugs
+that can wrongly merge unrelated objects and corrupt the output -
+including mixing up which content stream belongs to which page, which
+can make images render in the wrong position/size even when the raw
+image bytes are untouched. This tool fingerprints raw image bytes
+before/after and falls back to the safe output if those don't match,
+but that check does NOT catch every corruption mode (see above) -
+CONFIRMED to have let a corrupted page through once already. Treat
+--dedup as experimental and visually spot-check the output.
+
+Pass --lossy to also recompress embedded raster images as JPEG at a
+given quality. This DOES reduce image quality, but shrinks image-heavy
+PDFs much more than lossless alone can.
 
 Usage:
-    python compress_pdf.py                              # no args: compress every *.pdf sitting next to this script
+    python compress_pdf.py                              # no args: compress every *.pdf sitting next to this script (safe, lossless)
     python compress_pdf.py input.pdf
     python compress_pdf.py input.pdf output.pdf
     python compress_pdf.py some_folder/                # batch, writes *_compressed.pdf next to each source
     python compress_pdf.py some_folder/ out_folder/     # batch, mirrors folder structure into out_folder
     python compress_pdf.py input.pdf --in-place         # overwrite the original
+    python compress_pdf.py input.pdf --dedup                        # experimental: also merge duplicate objects
     python compress_pdf.py input.pdf --lossy                        # also recompress images (default quality 80)
     python compress_pdf.py input.pdf --lossy --image-quality 60     # more aggressive image recompression
-    python compress_pdf.py input.pdf --dedup                        # also merge duplicate objects (verified safe)
 """
 import argparse
 import hashlib
@@ -142,8 +146,11 @@ def main():
     parser.add_argument("--image-quality", type=int, default=80, choices=range(1, 101), metavar="1-100",
                          help="JPEG quality when --lossy is set (default 80; lower = smaller file, worse quality)")
     parser.add_argument("--dedup", action="store_true",
-                         help="Also merge duplicate objects (fonts/images/orphans) for extra savings; "
-                              "auto-verified against image corruption, falls back safely if verification fails")
+                         help="EXPERIMENTAL, use with caution: merge duplicate objects (fonts/images/orphans) for "
+                              "extra savings via pypdf's compress_identical_objects. This tool verifies raw image "
+                              "bytes are unchanged, but that check does NOT catch content-stream mix-ups between "
+                              "pages (a known pypdf bug class) - visually check output pages before trusting this.")
+    parser.set_defaults(dedup=False)
     args = parser.parse_args()
 
     recursive = args.input is not None
