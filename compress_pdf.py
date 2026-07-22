@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Losslessly compress PDF files.
 
-Re-encodes content streams with maximum deflate compression and
-deduplicates identical objects (fonts, images, etc). Does not touch
-image or text quality, so output is visually/textually identical to
-the input.
+Re-encodes content streams with maximum deflate compression. Does not
+touch image or text quality, so output is visually/textually identical
+to the input.
 
 Usage:
     python compress_pdf.py                              # no args: compress every *.pdf sitting next to this script
@@ -28,12 +27,6 @@ def compress_pdf(input_path: Path, output_path: Path, level: int = 9) -> tuple[i
 
     for page in writer.pages:
         page.compress_content_streams(level=level)
-
-    if hasattr(writer, "compress_identical_objects"):
-        try:
-            writer.compress_identical_objects(remove_duplicates=True, remove_unreferenced=True)
-        except TypeError:
-            writer.compress_identical_objects(remove_identicals=True, remove_orphans=True)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "wb") as f:

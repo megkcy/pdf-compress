@@ -1,6 +1,8 @@
 # PDF 無損壓縮小工具
 
-用 [pypdf](https://pypi.org/project/pypdf/) 對 PDF 做無損壓縮:重新用 deflate 壓縮內部的 content streams,並移除重複/未使用的物件(字型、圖片等)。完全不動圖片畫質或文字內容,壓縮前後頁數與文字逐一比對完全一致。
+用 [pypdf](https://pypi.org/project/pypdf/) 對 PDF 做無損壓縮:只重新用 deflate 壓縮內部的 content streams(繪圖指令),完全不動圖片畫質或文字內容。
+
+> **注意**:早期版本有多加一個「移除重複物件」(`compress_identical_objects`)的步驟想再壓縮更多,但這個 pypdf 功能有已知的 hash 誤判 bug,可能把不同的圖片誤判成相同而合併錯誤,導致輸出的圖片跑掉。現在已經移除這一步,只保留確定無損的 content stream 壓縮。
 
 ## 安裝
 
