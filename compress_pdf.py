@@ -1,95 +1,27 @@
 #!/usr/bin/env python3
 """Losslessly compress PDF files.
 
-By default, only re-encodes content streams with maximum deflate
-compression. Does not touch image or text quality, so output is
-visually/textually identical to the input (truly lossless).
-
-Pass --dedup to additionally merge duplicate objects (repeated fonts,
-repeated images, orphaned objects) via pypdf's compress_identical_objects.
-This can save a lot more space (10-20% on image-heavy PDFs that reuse
-artwork), but that pypdf feature has a history of hash-collision bugs
-that can wrongly merge unrelated objects and corrupt the output -
-including mixing up which content stream belongs to which page, which
-can make images render in the wrong position/size even when the raw
-image bytes are untouched. This tool fingerprints raw image bytes
-before/after and falls back to the safe output if those don't match,
-but that check does NOT catch every corruption mode (see above) -
-CONFIRMED to have let a corrupted page through once already. Treat
---dedup as experimental and visually spot-check the output.
-
-Pass --lossy to also recompress embedded raster images as JPEG at a
-given quality. This DOES reduce image quality, but shrinks image-heavy
-PDFs much more than lossless alone can.
+Re-encodes content streams with maximum deflate compression and
+deduplicates identical objects (fonts, images, etc). Does not touch
+image or text quality, so output is visually/textually identical to
+the input.
 
 Usage:
-    python compress_pdf.py                              # no args: compress every *.pdf sitting next to this script (safe, lossless)
+    python compress_pdf.py                              # no args: compress every *.pdf sitting next to this script
     python compress_pdf.py input.pdf
     python compress_pdf.py input.pdf output.pdf
     python compress_pdf.py some_folder/                # batch, writes *_compressed.pdf next to each source
     python compress_pdf.py some_folder/ out_folder/     # batch, mirrors folder structure into out_folder
     python compress_pdf.py input.pdf --in-place         # overwrite the original
-    python compress_pdf.py input.pdf --dedup                        # experimental: also merge duplicate objects
-    python compress_pdf.py input.pdf --lossy                        # also recompress images (default quality 80)
-    python compress_pdf.py input.pdf --lossy --image-quality 60     # more aggressive image recompression
 """
 import argparse
-import hashlib
-import io
 import sys
 from pathlib import Path
 
 from pypdf import PdfReader, PdfWriter
 
 
-def _recompress_image(img, quality: int) -> None:
-    """Replace img with a JPEG re-encode, but only if that's actually smaller."""
-    pil_img = img.image
-    if pil_img is None:
-        return
-    if pil_img.mode not in ("RGB", "L"):
-        pil_img = pil_img.convert("RGB")
-
-    buf = io.BytesIO()
-    pil_img.save(buf, format="JPEG", quality=quality, optimize=True)
-    new_size = buf.tell()
-
-    # img.data is the image's raw bytes as currently stored in the PDF stream.
-    # Only swap in the re-encode if it actually saves meaningful space -
-    # small/already-optimized images can come out LARGER as JPEG.
-    if new_size < len(img.data) * 0.9:
-        img.replace(pil_img, quality=quality, optimize=True)
-
-
-def _image_signatures(pages) -> list:
-    """Per-page list of image content hashes, used to detect dedup corruption."""
-    sigs = []
-    for page in pages:
-        page_sigs = []
-        try:
-            for img in page.images:
-                page_sigs.append(hashlib.sha256(img.data).hexdigest())
-        except Exception:
-            pass
-        sigs.append(page_sigs)
-    return sigs
-
-
-def _run_dedup(writer: PdfWriter) -> None:
-    try:
-        writer.compress_identical_objects(remove_duplicates=True, remove_unreferenced=True)
-    except TypeError:
-        writer.compress_identical_objects(remove_identicals=True, remove_orphans=True)
-
-
-def compress_pdf(
-    input_path: Path,
-    output_path: Path,
-    level: int = 9,
-    lossy: bool = False,
-    image_quality: int = 80,
-    dedup: bool = False,
-) -> tuple[int, int, bool]:
+def compress_pdf(input_path: Path, output_path: Path, level: int = 9) -> tuple[int, int]:
     reader = PdfReader(str(input_path))
     writer = PdfWriter()
     writer.append(reader)
@@ -97,32 +29,17 @@ def compress_pdf(
     for page in writer.pages:
         page.compress_content_streams(level=level)
 
-    dedup_ok = True
-    if dedup:
-        before_sigs = _image_signatures(PdfReader(str(input_path)).pages)
-        _run_dedup(writer)
-        after_sigs = _image_signatures(writer.pages)
-        if after_sigs != before_sigs:
-            dedup_ok = False
-            # Corruption detected - throw away this writer and rebuild cleanly without dedup.
-            writer = PdfWriter()
-            writer.append(PdfReader(str(input_path)))
-            for page in writer.pages:
-                page.compress_content_streams(level=level)
-
-    if lossy:
-        for page in writer.pages:
-            for img in page.images:
-                try:
-                    _recompress_image(img, image_quality)
-                except Exception:
-                    pass  # leave images pypdf/Pillow can't safely re-encode (e.g. CMYK, 1-bit) untouched
+    if hasattr(writer, "compress_identical_objects"):
+        try:
+            writer.compress_identical_objects(remove_duplicates=True, remove_unreferenced=True)
+        except TypeError:
+            writer.compress_identical_objects(remove_identicals=True, remove_orphans=True)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "wb") as f:
         writer.write(f)
 
-    return input_path.stat().st_size, output_path.stat().st_size, dedup_ok
+    return input_path.stat().st_size, output_path.stat().st_size
 
 
 def iter_pdfs(path: Path, recursive: bool = True):
@@ -142,15 +59,6 @@ def main():
     parser.add_argument("output", type=Path, nargs="?", help="Output file or folder (default: *_compressed.pdf next to input)")
     parser.add_argument("--level", type=int, default=9, choices=range(0, 10), help="Deflate compression level 0-9 (default 9)")
     parser.add_argument("--in-place", action="store_true", help="Overwrite the input file(s) instead of writing a new one")
-    parser.add_argument("--lossy", action="store_true", help="Also recompress embedded images as JPEG (reduces image quality)")
-    parser.add_argument("--image-quality", type=int, default=80, choices=range(1, 101), metavar="1-100",
-                         help="JPEG quality when --lossy is set (default 80; lower = smaller file, worse quality)")
-    parser.add_argument("--dedup", action="store_true",
-                         help="EXPERIMENTAL, use with caution: merge duplicate objects (fonts/images/orphans) for "
-                              "extra savings via pypdf's compress_identical_objects. This tool verifies raw image "
-                              "bytes are unchanged, but that check does NOT catch content-stream mix-ups between "
-                              "pages (a known pypdf bug class) - visually check output pages before trusting this.")
-    parser.set_defaults(dedup=False)
     args = parser.parse_args()
 
     recursive = args.input is not None
@@ -171,14 +79,14 @@ def main():
         try:
             if args.in_place:
                 tmp = src.with_suffix(src.suffix + ".tmp")
-                before, after, dedup_ok = compress_pdf(src, tmp, args.level, args.lossy, args.image_quality, args.dedup)
+                before, after = compress_pdf(src, tmp, args.level)
                 tmp.replace(src)
             elif args.output:
                 dst = args.output if args.input.is_file() else args.output / src.relative_to(args.input)
-                before, after, dedup_ok = compress_pdf(src, dst, args.level, args.lossy, args.image_quality, args.dedup)
+                before, after = compress_pdf(src, dst, args.level)
             else:
                 dst = src.with_name(f"{src.stem}_compressed.pdf")
-                before, after, dedup_ok = compress_pdf(src, dst, args.level, args.lossy, args.image_quality, args.dedup)
+                before, after = compress_pdf(src, dst, args.level)
         except Exception as exc:
             print(f"{src.name}: FAILED ({exc})", file=sys.stderr)
             continue
@@ -186,12 +94,7 @@ def main():
         total_before += before
         total_after += after
         pct = (1 - after / before) * 100 if before else 0
-        tag = f", lossy q{args.image_quality}" if args.lossy else ""
-        if args.dedup:
-            tag += ", dedup" if dedup_ok else ""
-        print(f"{src.name}: {before / 1024:.1f} KB -> {after / 1024:.1f} KB ({pct:.1f}% smaller{tag})")
-        if args.dedup and not dedup_ok:
-            print(f"  [warning] dedup verification failed for {src.name} - fell back to safe (non-dedup) output", file=sys.stderr)
+        print(f"{src.name}: {before / 1024:.1f} KB -> {after / 1024:.1f} KB ({pct:.1f}% smaller)")
 
     if len(targets) > 1 and total_before:
         pct = (1 - total_after / total_before) * 100
