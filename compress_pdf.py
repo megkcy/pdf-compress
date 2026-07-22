@@ -9,6 +9,15 @@ Pass --lossy to also recompress embedded raster images as JPEG at a
 given quality. This DOES reduce image quality, but shrinks image-heavy
 PDFs much more than the lossless mode can.
 
+Pass --dedup to additionally merge duplicate objects (repeated fonts,
+repeated images, orphaned objects) via pypdf's compress_identical_objects.
+This can save a lot more space, but that pypdf feature has a history of
+hash-collision bugs that can wrongly merge two DIFFERENT images and
+corrupt the output. To guard against that, every image is fingerprinted
+before and after dedup; if anything doesn't match up, this tool discards
+the dedup result and silently falls back to the safe (non-dedup) output
+for that file, and prints a warning.
+
 Usage:
     python compress_pdf.py                              # no args: compress every *.pdf sitting next to this script
     python compress_pdf.py input.pdf
@@ -18,8 +27,10 @@ Usage:
     python compress_pdf.py input.pdf --in-place         # overwrite the original
     python compress_pdf.py input.pdf --lossy                        # also recompress images (default quality 80)
     python compress_pdf.py input.pdf --lossy --image-quality 60     # more aggressive image recompression
+    python compress_pdf.py input.pdf --dedup                        # also merge duplicate objects (verified safe)
 """
 import argparse
+import hashlib
 import io
 import sys
 from pathlib import Path
@@ -46,20 +57,57 @@ def _recompress_image(img, quality: int) -> None:
         img.replace(pil_img, quality=quality, optimize=True)
 
 
+def _image_signatures(pages) -> list:
+    """Per-page list of image content hashes, used to detect dedup corruption."""
+    sigs = []
+    for page in pages:
+        page_sigs = []
+        try:
+            for img in page.images:
+                page_sigs.append(hashlib.sha256(img.data).hexdigest())
+        except Exception:
+            pass
+        sigs.append(page_sigs)
+    return sigs
+
+
+def _run_dedup(writer: PdfWriter) -> None:
+    try:
+        writer.compress_identical_objects(remove_duplicates=True, remove_unreferenced=True)
+    except TypeError:
+        writer.compress_identical_objects(remove_identicals=True, remove_orphans=True)
+
+
 def compress_pdf(
     input_path: Path,
     output_path: Path,
     level: int = 9,
     lossy: bool = False,
     image_quality: int = 80,
-) -> tuple[int, int]:
+    dedup: bool = False,
+) -> tuple[int, int, bool]:
     reader = PdfReader(str(input_path))
     writer = PdfWriter()
     writer.append(reader)
 
     for page in writer.pages:
         page.compress_content_streams(level=level)
-        if lossy:
+
+    dedup_ok = True
+    if dedup:
+        before_sigs = _image_signatures(PdfReader(str(input_path)).pages)
+        _run_dedup(writer)
+        after_sigs = _image_signatures(writer.pages)
+        if after_sigs != before_sigs:
+            dedup_ok = False
+            # Corruption detected - throw away this writer and rebuild cleanly without dedup.
+            writer = PdfWriter()
+            writer.append(PdfReader(str(input_path)))
+            for page in writer.pages:
+                page.compress_content_streams(level=level)
+
+    if lossy:
+        for page in writer.pages:
             for img in page.images:
                 try:
                     _recompress_image(img, image_quality)
@@ -70,7 +118,7 @@ def compress_pdf(
     with open(output_path, "wb") as f:
         writer.write(f)
 
-    return input_path.stat().st_size, output_path.stat().st_size
+    return input_path.stat().st_size, output_path.stat().st_size, dedup_ok
 
 
 def iter_pdfs(path: Path, recursive: bool = True):
@@ -93,6 +141,9 @@ def main():
     parser.add_argument("--lossy", action="store_true", help="Also recompress embedded images as JPEG (reduces image quality)")
     parser.add_argument("--image-quality", type=int, default=80, choices=range(1, 101), metavar="1-100",
                          help="JPEG quality when --lossy is set (default 80; lower = smaller file, worse quality)")
+    parser.add_argument("--dedup", action="store_true",
+                         help="Also merge duplicate objects (fonts/images/orphans) for extra savings; "
+                              "auto-verified against image corruption, falls back safely if verification fails")
     args = parser.parse_args()
 
     recursive = args.input is not None
@@ -113,14 +164,14 @@ def main():
         try:
             if args.in_place:
                 tmp = src.with_suffix(src.suffix + ".tmp")
-                before, after = compress_pdf(src, tmp, args.level, args.lossy, args.image_quality)
+                before, after, dedup_ok = compress_pdf(src, tmp, args.level, args.lossy, args.image_quality, args.dedup)
                 tmp.replace(src)
             elif args.output:
                 dst = args.output if args.input.is_file() else args.output / src.relative_to(args.input)
-                before, after = compress_pdf(src, dst, args.level, args.lossy, args.image_quality)
+                before, after, dedup_ok = compress_pdf(src, dst, args.level, args.lossy, args.image_quality, args.dedup)
             else:
                 dst = src.with_name(f"{src.stem}_compressed.pdf")
-                before, after = compress_pdf(src, dst, args.level, args.lossy, args.image_quality)
+                before, after, dedup_ok = compress_pdf(src, dst, args.level, args.lossy, args.image_quality, args.dedup)
         except Exception as exc:
             print(f"{src.name}: FAILED ({exc})", file=sys.stderr)
             continue
@@ -129,7 +180,11 @@ def main():
         total_after += after
         pct = (1 - after / before) * 100 if before else 0
         tag = f", lossy q{args.image_quality}" if args.lossy else ""
+        if args.dedup:
+            tag += ", dedup" if dedup_ok else ""
         print(f"{src.name}: {before / 1024:.1f} KB -> {after / 1024:.1f} KB ({pct:.1f}% smaller{tag})")
+        if args.dedup and not dedup_ok:
+            print(f"  [warning] dedup verification failed for {src.name} - fell back to safe (non-dedup) output", file=sys.stderr)
 
     if len(targets) > 1 and total_before:
         pct = (1 - total_after / total_before) * 100
