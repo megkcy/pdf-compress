@@ -8,6 +8,10 @@
 pip install -r requirements.txt
 ```
 
+## Windows 快速使用
+
+把要壓縮的 PDF 丟進這個資料夾,直接雙擊 `compress.bat` 就會自動壓縮資料夾內所有 *.pdf(第一次執行會自動安裝所需套件)。
+
 ## 用法
 
 ```bash
