@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""Losslessly compress PDF files.
+"""Compress PDF files.
 
-Re-encodes content streams with maximum deflate compression. Does not
-touch image or text quality, so output is visually/textually identical
-to the input.
+By default, only re-encodes content streams with maximum deflate
+compression. Does not touch image or text quality, so output is
+visually/textually identical to the input (truly lossless).
+
+Pass --lossy to also recompress embedded raster images as JPEG at a
+given quality. This DOES reduce image quality, but shrinks image-heavy
+PDFs much more than the lossless mode can.
 
 Usage:
     python compress_pdf.py                              # no args: compress every *.pdf sitting next to this script
@@ -12,21 +16,55 @@ Usage:
     python compress_pdf.py some_folder/                # batch, writes *_compressed.pdf next to each source
     python compress_pdf.py some_folder/ out_folder/     # batch, mirrors folder structure into out_folder
     python compress_pdf.py input.pdf --in-place         # overwrite the original
+    python compress_pdf.py input.pdf --lossy                        # also recompress images (default quality 80)
+    python compress_pdf.py input.pdf --lossy --image-quality 60     # more aggressive image recompression
 """
 import argparse
+import io
 import sys
 from pathlib import Path
 
 from pypdf import PdfReader, PdfWriter
 
 
-def compress_pdf(input_path: Path, output_path: Path, level: int = 9) -> tuple[int, int]:
+def _recompress_image(img, quality: int) -> None:
+    """Replace img with a JPEG re-encode, but only if that's actually smaller."""
+    pil_img = img.image
+    if pil_img is None:
+        return
+    if pil_img.mode not in ("RGB", "L"):
+        pil_img = pil_img.convert("RGB")
+
+    buf = io.BytesIO()
+    pil_img.save(buf, format="JPEG", quality=quality, optimize=True)
+    new_size = buf.tell()
+
+    # img.data is the image's raw bytes as currently stored in the PDF stream.
+    # Only swap in the re-encode if it actually saves meaningful space -
+    # small/already-optimized images can come out LARGER as JPEG.
+    if new_size < len(img.data) * 0.9:
+        img.replace(pil_img, quality=quality, optimize=True)
+
+
+def compress_pdf(
+    input_path: Path,
+    output_path: Path,
+    level: int = 9,
+    lossy: bool = False,
+    image_quality: int = 80,
+) -> tuple[int, int]:
     reader = PdfReader(str(input_path))
     writer = PdfWriter()
     writer.append(reader)
 
     for page in writer.pages:
         page.compress_content_streams(level=level)
+        if lossy:
+            for img in page.images:
+                try:
+                    _recompress_image(img, image_quality)
+                except Exception:
+                    pass  # leave images pypdf/Pillow can't safely re-encode (e.g. CMYK, 1-bit) untouched
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "wb") as f:
@@ -52,6 +90,9 @@ def main():
     parser.add_argument("output", type=Path, nargs="?", help="Output file or folder (default: *_compressed.pdf next to input)")
     parser.add_argument("--level", type=int, default=9, choices=range(0, 10), help="Deflate compression level 0-9 (default 9)")
     parser.add_argument("--in-place", action="store_true", help="Overwrite the input file(s) instead of writing a new one")
+    parser.add_argument("--lossy", action="store_true", help="Also recompress embedded images as JPEG (reduces image quality)")
+    parser.add_argument("--image-quality", type=int, default=80, choices=range(1, 101), metavar="1-100",
+                         help="JPEG quality when --lossy is set (default 80; lower = smaller file, worse quality)")
     args = parser.parse_args()
 
     recursive = args.input is not None
@@ -72,14 +113,14 @@ def main():
         try:
             if args.in_place:
                 tmp = src.with_suffix(src.suffix + ".tmp")
-                before, after = compress_pdf(src, tmp, args.level)
+                before, after = compress_pdf(src, tmp, args.level, args.lossy, args.image_quality)
                 tmp.replace(src)
             elif args.output:
                 dst = args.output if args.input.is_file() else args.output / src.relative_to(args.input)
-                before, after = compress_pdf(src, dst, args.level)
+                before, after = compress_pdf(src, dst, args.level, args.lossy, args.image_quality)
             else:
                 dst = src.with_name(f"{src.stem}_compressed.pdf")
-                before, after = compress_pdf(src, dst, args.level)
+                before, after = compress_pdf(src, dst, args.level, args.lossy, args.image_quality)
         except Exception as exc:
             print(f"{src.name}: FAILED ({exc})", file=sys.stderr)
             continue
@@ -87,7 +128,8 @@ def main():
         total_before += before
         total_after += after
         pct = (1 - after / before) * 100 if before else 0
-        print(f"{src.name}: {before / 1024:.1f} KB -> {after / 1024:.1f} KB ({pct:.1f}% smaller)")
+        tag = f", lossy q{args.image_quality}" if args.lossy else ""
+        print(f"{src.name}: {before / 1024:.1f} KB -> {after / 1024:.1f} KB ({pct:.1f}% smaller{tag})")
 
     if len(targets) > 1 and total_before:
         pct = (1 - total_after / total_before) * 100
