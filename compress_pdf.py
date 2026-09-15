@@ -7,7 +7,7 @@ image or text quality, so output is visually/textually identical to
 the input.
 
 Usage:
-    python compress_pdf.py                              # no args: compress every *.pdf sitting next to this script
+    python compress_pdf.py                              # no args: back up + compress every *.pdf sitting next to this script (same filename, in place)
     python compress_pdf.py input.pdf
     python compress_pdf.py input.pdf output.pdf
     python compress_pdf.py some_folder/                # batch, writes *_compressed.pdf next to each source
@@ -15,10 +15,13 @@ Usage:
     python compress_pdf.py input.pdf --in-place         # overwrite the original
 """
 import argparse
+import shutil
 import sys
 from pathlib import Path
 
 from pypdf import PdfReader, PdfWriter
+
+BACKUP_DIRNAME = "backup"
 
 
 def compress_pdf(input_path: Path, output_path: Path, level: int = 9) -> tuple[int, int]:
@@ -50,6 +53,8 @@ def iter_pdfs(path: Path, recursive: bool = True):
     for p in sorted(pdfs):
         if p.stem.endswith("_compressed"):
             continue
+        if BACKUP_DIRNAME in p.relative_to(path).parts[:-1]:
+            continue
         yield p
 
 
@@ -74,10 +79,23 @@ def main():
     if not targets:
         sys.exit("No PDF files found.")
 
+    default_mode = args.output is None and not args.in_place and args.input == Path(__file__).resolve().parent
+
     total_before = total_after = 0
+    skipped = 0
     for src in targets:
         try:
-            if args.in_place:
+            if default_mode:
+                backup_dst = args.input / BACKUP_DIRNAME / src.relative_to(args.input)
+                if backup_dst.exists():
+                    skipped += 1
+                    continue
+                backup_dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, backup_dst)
+                tmp = src.with_suffix(src.suffix + ".tmp")
+                before, after = compress_pdf(src, tmp, args.level)
+                tmp.replace(src)
+            elif args.in_place:
                 tmp = src.with_suffix(src.suffix + ".tmp")
                 before, after = compress_pdf(src, tmp, args.level)
                 tmp.replace(src)
@@ -95,6 +113,9 @@ def main():
         total_after += after
         pct = (1 - after / before) * 100 if before else 0
         print(f"{src.name}: {before / 1024:.1f} KB -> {after / 1024:.1f} KB ({pct:.1f}% smaller)")
+
+    if skipped:
+        print(f"({skipped} file(s) already backed up/compressed, skipped)")
 
     if len(targets) > 1 and total_before:
         pct = (1 - total_after / total_before) * 100
